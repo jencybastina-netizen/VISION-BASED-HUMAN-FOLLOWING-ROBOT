@@ -1,0 +1,868 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vision-Based Human Following Robot - Outdoor Simulator</title>
+<style>
+:root{--bg:#0f1418;--card:#182028;--line:#26323d;--tx:#e6edf3;--mut:#8fa1b0;--acc:#4fd1a5;--warn:#ffb454;--bad:#ff6b6b}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--tx);font:14px/1.45 system-ui,"Segoe UI",Roboto,sans-serif}
+header{padding:14px 18px;border-bottom:1px solid var(--line)}
+h1{font-size:18px;margin:0}
+h1 .tag{font-size:11px;font-weight:600;color:var(--acc);border:1px solid var(--acc);border-radius:20px;padding:1px 8px;margin-left:8px;vertical-align:middle}
+header p{margin:3px 0 0;color:var(--mut);font-size:13px}
+main{display:grid;grid-template-columns:minmax(0,1fr) 400px;gap:14px;padding:14px;max-width:1500px;margin:0 auto}
+@media(max-width:1000px){main{grid-template-columns:1fr}}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-bottom:12px}
+.card h3{margin:0 0 8px;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--mut)}
+.bar{display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center}
+.bar label{display:flex;align-items:center;gap:6px;color:var(--mut);font-size:13px}
+button,select{background:#22303b;color:var(--tx);border:1px solid #33465a;border-radius:7px;padding:6px 10px;font:inherit;cursor:pointer}
+button:hover{background:#2b3c4a}
+button.pri{background:var(--acc);border-color:var(--acc);color:#04241a;font-weight:600}
+canvas{width:100%;height:auto;display:block;border-radius:8px;background:#000}
+#mask{image-rendering:pixelated}
+.legend{display:flex;flex-wrap:wrap;gap:6px 16px;margin-top:8px;color:var(--mut);font-size:12px}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:5px;vertical-align:-1px}
+.grid{display:grid;grid-template-columns:1fr auto;gap:3px 12px;font-size:13px}
+.grid dt{color:var(--mut)}.grid dd{margin:0;text-align:right;font-variant-numeric:tabular-nums}
+.verdict{margin-top:8px;padding:6px 10px;border-radius:7px;font-weight:600;font-size:13px;background:#1c3b31;color:var(--acc)}
+.verdict.bad{background:#3d2a1c;color:var(--warn)}
+.state{display:inline-block;padding:2px 9px;border-radius:20px;font-weight:600;font-size:12px;background:#22303b}
+details{color:var(--mut);font-size:13px}details summary{cursor:pointer;color:var(--tx);font-weight:600}
+details ol,details ul{padding-left:18px;margin:6px 0}
+.small{font-size:12px;color:var(--mut)}
+</style>
+</head>
+<body>
+<header>
+  <h1>Vision-Based Human Following Robot <span class="tag">outdoor simulator</span></h1>
+  <p>Runs completely in your browser: camera vision, occlusion-robust tracking, lighting adaptation and obstacle avoidance. No install, no server.</p>
+</header>
+<main>
+<section>
+  <div class="card bar">
+    <button id="bPlay" class="pri">Pause</button>
+    <button id="bReset">Reset</button>
+    <label>System
+      <select id="sMode"><option value="robust">Robust (full system)</option><option value="baseline">Baseline (naive)</option></select></label>
+    <label>Lighting
+      <select id="sLight">
+        <option value="noon">Noon sun + shadows</option>
+        <option value="overcast">Overcast</option>
+        <option value="dusk">Dusk</option>
+        <option value="night">Night</option>
+        <option value="glare">Harsh sun glare</option>
+        <option value="dynamic">Dynamic (changes over time)</option>
+      </select></label>
+    <label>Sim speed
+      <select id="sSim"><option value="1">1x</option><option value="2">2x</option><option value="4">4x</option></select></label>
+  </div>
+
+  <div class="card">
+    <canvas id="world" width="900" height="600"></canvas>
+    <div class="legend">
+      <span><i style="background:#cd1c20"></i>person to follow</span>
+      <span><i style="background:#2a58c8"></i>distractor / crossing pedestrian</span>
+      <span><i style="background:#e8e8e8"></i>robot (yellow wedge = camera view)</span>
+      <span><i style="background:#3cf0ff"></i>tracker estimate + uncertainty</span>
+      <span>Shift+click on the map drops a rock</span>
+    </div>
+  </div>
+
+  <div class="card bar">
+    <button id="bCross">Pedestrian crosses (occlusion test)</button>
+    <label>Distractor
+      <select id="sDis"><option value="none">none</option><option value="blue">blue shirt</option><option value="similar">similar orange shirt</option></select></label>
+    <label><input type="checkbox" id="cLidar"> lidar rays</label>
+    <label><input type="checkbox" id="cEst" checked> tracker estimate</label>
+    <label><input type="checkbox" id="cMan"> steer the person (click map)</label>
+    <label>Person speed <input type="range" id="rSpd" min="0.4" max="1.5" step="0.05" value="0.9"> <span id="vSpd">0.9</span> m/s</label>
+    <button id="bRelock">Re-lock target</button>
+  </div>
+</section>
+
+<aside>
+  <div class="card">
+    <h3>Robot camera (after lighting)</h3>
+    <canvas id="cam" width="320" height="180"></canvas>
+    <h3 style="margin-top:10px">Vision pipeline: appearance mask</h3>
+    <canvas id="mask" width="160" height="90"></canvas>
+    <div class="small" style="margin-top:6px">Green = pixels matching the learned target appearance. Boxes: green = accepted target, orange = rejected candidate.</div>
+  </div>
+
+  <div class="card">
+    <h3>Live metrics <span id="kState" class="state">-</span></h3>
+    <dl class="grid">
+      <dt>Lighting now</dt><dd id="kLight">-</dd>
+      <dt>True follow distance (goal 1.6 m)</dt><dd id="kDist">-</dd>
+      <dt>Distance error (RMS)</dt><dd id="kRms">-</dd>
+      <dt>Target visible to camera</dt><dd id="kVis">-</dd>
+      <dt>Detected when visible</dt><dd id="kDet">-</dd>
+      <dt>Tracker position error</dt><dd id="kTrk">-</dd>
+      <dt>Collisions</dt><dd id="kCol">-</dd>
+      <dt>Wrong-person switches</dt><dd id="kId">-</dd>
+      <dt>Lost-target events</dt><dd id="kLost">-</dd>
+      <dt>Recoveries after loss (avg time)</dt><dd id="kRec">-</dd>
+    </dl>
+    <div id="kVerdict" class="verdict">-</div>
+  </div>
+
+  <div class="card">
+    <h3>Follow distance over last 60 s</h3>
+    <canvas id="chart" width="380" height="110"></canvas>
+    <div class="small">Grey band = person hidden from the camera (occlusion). Red tick = visible but missed.</div>
+  </div>
+
+  <div class="card">
+    <h3>Try it on a real camera</h3>
+    <button id="bWeb">Start webcam test</button>
+    <div class="small" style="margin-top:6px">Runs the same lighting-adaptive detector on your webcam. Click the person's shirt in the camera image to lock on. Works on https, localhost or a local file. Nothing is uploaded.</div>
+    <div id="webTxt" class="small" style="margin-top:6px;color:var(--tx)"></div>
+  </div>
+
+  <div class="card">
+    <details>
+      <summary>How it works</summary>
+      <ol>
+        <li><b>Camera:</b> a virtual pinhole camera renders what the robot sees (trees, walls and people can hide the target). Lighting effects (dusk, night, glare, dappled shadows, sensor noise) are applied to the pixels.</li>
+        <li><b>Illumination normalisation:</b> 2x2 averaging (denoise), auto-exposure, then HSV conversion.</li>
+        <li><b>Appearance model:</b> a hue histogram of the target's shirt is learned at start and slowly adapted. Back-projection gives a mask; morphology removes noise; connected components give candidates.</li>
+        <li><b>Identity:</b> candidates are compared with the model (Bhattacharyya similarity) and gated by the Kalman prediction, so a similar shirt is rejected.</li>
+        <li><b>Distance/bearing:</b> pinhole geometry from the box, fused with lidar range.</li>
+        <li><b>Kalman filter</b> (constant velocity) keeps predicting during occlusion. The robot walks to the predicted position and re-acquires the person when visible again; if lost too long it searches.</li>
+        <li><b>Planner:</b> follow-the-gap steering on inflated lidar ranges, so the robot goes around obstacles instead of into them.</li>
+      </ol>
+      <p><b>Baseline</b> mode uses a fixed red colour threshold, no filter, no prediction and only emergency stop. Switch between the two under the same lighting to see the difference.</p>
+      <p><b>Use on any website:</b> this is one HTML file with no dependencies. Upload it to any host, embed it in an iframe, or open it by double-click.</p>
+    </details>
+  </div>
+</aside>
+</main>
+
+<script>
+(()=>{
+'use strict';
+/* ================= utilities ================= */
+const TAU=Math.PI*2, rad=d=>d*Math.PI/180;
+const clamp=(v,a,b)=>v<a?a:(v>b?b:v);
+const wrap=a=>{while(a>Math.PI)a-=TAU;while(a<-Math.PI)a+=TAU;return a;};
+let _seed=20260928;
+const rnd=()=>{_seed=(_seed*1664525+1013904223)>>>0;return _seed/4294967296;};
+const gauss=()=>Math.sqrt(-2*Math.log(rnd()+1e-9))*Math.cos(TAU*rnd());
+const $=id=>document.getElementById(id);
+const lerp=(a,b,t)=>a+(b-a)*t;
+
+/* ================= constants ================= */
+const CW=320,CH=180,HW=160,HH=90,N2=HW*HH;
+const HFOV=rad(80), F=(CW/2)/Math.tan(HFOV/2);
+const DT=1/30, CAM_H=1.0, ROBOT_R=0.3, PERSON_R=0.25, FOLLOW_D=1.6, SHIRT_H=0.55;
+const TARGET_SHIRT=[205,28,32];
+const SUN_AZ=-2.3, SUN={x:Math.cos(SUN_AZ),y:Math.sin(SUN_AZ)};
+
+/* ================= world ================= */
+const STATIC=[];
+const C=(t,x,y,r,h)=>STATIC.push({k:'circle',t,x,y,r,hgt:h});
+const R=(t,x,y,w,h,z)=>STATIC.push({k:'rect',t,x,y,w,h,hgt:z});
+C('tree',6,4,.7,4.5);C('tree',24,4,.7,4.5);C('tree',5,15,.8,4.5);C('tree',25,15,.8,4.5);
+C('tree',15,4.5,.6,4.5);C('tree',15,15.5,.6,4.5);C('tree',27,9.5,.6,4.5);C('tree',2.5,9.5,.6,4.5);
+C('rock',9,12.5,.35,.5);C('rock',21,16.5,.35,.5);C('rock',12,13.5,.4,.6);
+C('bush',19.5,4.5,.5,1);C('bush',22,8,.5,1);C('bush',6,9,.5,1);
+R('wall',12,8,6,.6,2);
+R('fence',-.4,-.4,30.8,.4,2);R('fence',-.4,20,30.8,.4,2);R('fence',-.4,-.4,.4,20.8,2);R('fence',30,-.4,.4,20.8,2);
+const BASE_STATIC=STATIC.length;
+const SEG={
+  tree:[[0,1.8,92,64,40],[1.8,4.5,38,92,44]],
+  rock:[[0,1,122,122,126]],
+  bush:[[0,1,44,98,50]],
+  wall:[[0,2,152,140,128]],
+  fence:[[0,2,112,88,62]]
+};
+const TARGET_ROUTE=[[8,6.5],[19,6.5],[20,10.3],[10,10.3],[10,6.5],[10,2],[22,2],[26.5,2.3],[25,7],[23.5,12.5],[18,14.5],[13,12],[8,10.3]];
+const DISTR_ROUTE=[[16.5,11.8],[24,11.8]];
+const SEARCH_PTS=[[9,7],[14,11.5],[22,6],[21,13],[9,17],[16,2]];
+
+function mkPerson(x,y,shirt,active){const p={x,y,vx:0,vy:0,active,wi:1,segs:null,goal:null,shirt};setShirt(p,shirt);return p;}
+function setShirt(p,s){p.shirt=s;p.segs=[[0,.9,38,46,78],[.9,1.45,s[0],s[1],s[2]],[1.45,1.7,224,172,110]];}
+let target,distr,cross,PEOPLE;
+
+/* ray casting */
+function rayCircle(ox,oy,dx,dy,cx,cy,r){
+  const fx=ox-cx,fy=oy-cy,c=fx*fx+fy*fy-r*r;
+  if(c<0) return (dx*-fx+dy*-fy)>0?0:Infinity;      // inside: blocked only when moving inward
+  const b=fx*dx+fy*dy; if(b>0) return Infinity;
+  const disc=b*b-c; if(disc<0) return Infinity;
+  return -b-Math.sqrt(disc);
+}
+function rayRect(ox,oy,dx,dy,x,y,w,h){
+  if(ox>x&&ox<x+w&&oy>y&&oy<y+h){
+    const l=ox-x,r=x+w-ox,t=oy-y,b=y+h-oy,m=Math.min(l,r,t,b);
+    let nx=0,ny=0; if(m===l)nx=1; else if(m===r)nx=-1; else if(m===t)ny=1; else ny=-1;
+    return (dx*nx+dy*ny)>0?0:Infinity;
+  }
+  let tmin=0,tmax=Infinity;
+  if(Math.abs(dx)<1e-9){ if(ox<x||ox>x+w) return Infinity; }
+  else{ let a=(x-ox)/dx,b=(x+w-ox)/dx; if(a>b){const t=a;a=b;b=t;} if(a>tmin)tmin=a; if(b<tmax)tmax=b; }
+  if(Math.abs(dy)<1e-9){ if(oy<y||oy>y+h) return Infinity; }
+  else{ let a=(y-oy)/dy,b=(y+h-oy)/dy; if(a>b){const t=a;a=b;b=t;} if(a>tmin)tmin=a; if(b<tmax)tmax=b; }
+  return tmin>tmax?Infinity:tmin;
+}
+function castStatic(ox,oy,dx,dy,m){
+  let best=Infinity;
+  for(let i=0;i<STATIC.length;i++){
+    const o=STATIC[i]; let t;
+    if(o.k==='circle') t=rayCircle(ox,oy,dx,dy,o.x,o.y,o.r+m);
+    else t=rayRect(ox,oy,dx,dy,o.x-m,o.y-m,o.w+2*m,o.h+2*m);
+    if(t<best)best=t;
+  }
+  return best;
+}
+function castPeople(ox,oy,dx,dy,m,skipTarget){
+  let best=Infinity;
+  for(const p of PEOPLE){ if(!p.active||(skipTarget&&p===target))continue; const t=rayCircle(ox,oy,dx,dy,p.x,p.y,PERSON_R+m); if(t<best)best=t; }
+  return best;
+}
+function pushOut(p,rr){
+  let hit=false;
+  for(const o of STATIC){
+    if(o.k==='circle'){
+      const dx=p.x-o.x,dy=p.y-o.y,d=Math.hypot(dx,dy),m=o.r+rr;
+      if(d<m){ if(d>1e-6){p.x=o.x+dx/d*m;p.y=o.y+dy/d*m;} else p.x=o.x+m; hit=true; }
+    }else{
+      const cx=clamp(p.x,o.x,o.x+o.w),cy=clamp(p.y,o.y,o.y+o.h),dx=p.x-cx,dy=p.y-cy,d=Math.hypot(dx,dy);
+      if(d<rr){
+        if(d>1e-6){p.x=cx+dx/d*rr;p.y=cy+dy/d*rr;}
+        else{ const l=p.x-o.x,r2=o.x+o.w-p.x,t=p.y-o.y,b=o.y+o.h-p.y,m=Math.min(l,r2,t,b);
+          if(m===l)p.x=o.x-rr; else if(m===r2)p.x=o.x+o.w+rr; else if(m===t)p.y=o.y-rr; else p.y=o.y+o.h+rr; }
+        hit=true;
+      }
+    }
+  }
+  return hit;
+}
+
+/* ================= lighting ================= */
+const LIGHTS={
+  noon:    {gain:1.00,contrast:1.00,tint:[1,1,1],        noise:3, glare:0,   shadow:.40,name:'Noon sun'},
+  overcast:{gain:.70, contrast:.70, tint:[.95,.98,1.05], noise:3, glare:0,   shadow:0,  name:'Overcast'},
+  dusk:    {gain:.38, contrast:.80, tint:[1.3,.95,.65],  noise:5, glare:.35, shadow:.1, name:'Dusk'},
+  night:   {gain:.14, contrast:.90, tint:[.75,.9,1.35],  noise:6, glare:0,   shadow:0,  name:'Night'},
+  glare:   {gain:1.25,contrast:1.30,tint:[1.05,1.02,.95],noise:3, glare:1,   shadow:.65,name:'Harsh glare'}
+};
+const DYN=['noon','overcast','dusk','night','glare'];
+const lightNow={gain:1,contrast:1,tint:[1,1,1],noise:3,glare:0,shadow:.4,name:'Noon sun'};
+function setLight(src){lightNow.gain=src.gain;lightNow.contrast=src.contrast;lightNow.tint=src.tint.slice();lightNow.noise=src.noise;lightNow.glare=src.glare;lightNow.shadow=src.shadow;lightNow.name=src.name;}
+function updateLight(){
+  if(cfg.light!=='dynamic'){ setLight(LIGHTS[cfg.light]); return; }
+  const u=(simT/14)%DYN.length, a=Math.floor(u), b=(a+1)%DYN.length;
+  let f=clamp((u-a-0.55)/0.45,0,1); f=f*f*(3-2*f);
+  const A=LIGHTS[DYN[a]],B=LIGHTS[DYN[b]];
+  lightNow.gain=lerp(A.gain,B.gain,f);lightNow.contrast=lerp(A.contrast,B.contrast,f);
+  lightNow.tint=[lerp(A.tint[0],B.tint[0],f),lerp(A.tint[1],B.tint[1],f),lerp(A.tint[2],B.tint[2],f)];
+  lightNow.noise=lerp(A.noise,B.noise,f);lightNow.glare=lerp(A.glare,B.glare,f);lightNow.shadow=lerp(A.shadow,B.shadow,f);
+  lightNow.name=(f<0.5?A.name:B.name)+(f>0.02&&f<0.98?' (changing)':'');
+}
+
+/* ================= state ================= */
+const cfg={running:true,mult:1,mode:'robust',light:'noon',distr:'none',manual:false,speed:0.9,lidar:false,est:true};
+let simT=0,frameNo=0,rob,model,trk,M,hist,search,nav={prevA:0},base={side:1,beta:0,dist:3};
+let lastBlobs=[],lastAcc=null,gtVis=false,gtDist=0;
+const cctxHolder={};
+
+/* ================= camera render ================= */
+const cam=new Uint8ClampedArray(CW*CH*4);
+const noiseTab=new Float32Array(8192); for(let i=0;i<8192;i++)noiseTab[i]=gauss();
+const SA=new Float32Array(CW),CA=new Float32Array(CW),SB=new Float32Array(CH),CB=new Float32Array(CH);
+function drawHit(x,h,dx,dy,cosOff,ox,oy){
+  const z=h.t*cosOff; if(z<0.15)return;
+  let cx,cy,segs,cap=9;
+  if(h.p){cx=h.p.x;cy=h.p.y;segs=h.p.segs;}
+  else{ const o=h.o; segs=SEG[o.t]; cap=o.hgt; if(o.k==='circle'){cx=o.x;cy=o.y;} }
+  let shade=0.78;
+  if(cx!==undefined){ const px=ox+dx*h.t-cx,py=oy+dy*h.t-cy,l=Math.hypot(px,py)||1; shade=0.55+0.45*Math.max(0,(px*SUN.x+py*SUN.y)/l); }
+  const fog=clamp(z/45,0,0.6);
+  for(let s=0;s<segs.length;s++){
+    const sg=segs[s], top=Math.min(sg[1],cap), bot=sg[0]; if(top<=bot)continue;
+    let y0=Math.round(CH/2-(top-CAM_H)*F/z), y1=Math.round(CH/2-(bot-CAM_H)*F/z);
+    if(y0<0)y0=0; if(y1>CH)y1=CH; if(y1<=y0)continue;
+    const r=sg[2]*shade*(1-fog)+170*fog, g=sg[3]*shade*(1-fog)+195*fog, b=sg[4]*shade*(1-fog)+215*fog;
+    for(let y=y0;y<y1;y++){const i=(y*CW+x)*4;cam[i]=r;cam[i+1]=g;cam[i+2]=b;}
+  }
+}
+function renderScene(){
+  const th=rob.th, ox=rob.x+Math.cos(th)*0.15, oy=rob.y+Math.sin(th)*0.15, hz=CH/2;
+  for(let y=0;y<CH;y++){
+    let r,g,b,f=0;
+    if(y<hz){const k=y/hz; r=78+k*98; g=132+k*72; b=214+k*22;}
+    else{const dd=y-hz+0.5, dist=CAM_H*F/dd; f=clamp(dist/45,0,1); r=64+f*100; g=114+f*80; b=52+f*160;}
+    for(let x=0;x<CW;x++){
+      const i=(y*CW+x)*4; let sp=0;
+      if(y>=hz){ sp=((((x*73+y*151)^(x*y))&15)-8)*(1-f)*1.1; }
+      cam[i]=r+sp;cam[i+1]=g+sp*1.2;cam[i+2]=b+sp*.6;cam[i+3]=255;
+    }
+  }
+  const hits=[];
+  for(let x=0;x<CW;x++){
+    const off=Math.atan2(x+0.5-CW/2,F), ang=th+off, dx=Math.cos(ang), dy=Math.sin(ang), cosOff=Math.cos(off);
+    hits.length=0;
+    for(let i=0;i<STATIC.length;i++){
+      const o=STATIC[i]; const t=o.k==='circle'?rayCircle(ox,oy,dx,dy,o.x,o.y,o.r):rayRect(ox,oy,dx,dy,o.x,o.y,o.w,o.h);
+      if(t<60&&t>0.02)hits.push({t,o,p:null});
+    }
+    for(const p of PEOPLE){ if(!p.active)continue; const t=rayCircle(ox,oy,dx,dy,p.x,p.y,PERSON_R); if(t<60&&t>0.02)hits.push({t,o:null,p}); }
+    hits.sort((a,b)=>b.t-a.t);
+    for(const h of hits)drawHit(x,h,dx,dy,cosOff,ox,oy);
+  }
+}
+function applyLighting(){
+  const L=lightNow, ph=simT*0.35;
+  for(let x=0;x<CW;x++){const a=x*0.045+ph;SA[x]=Math.sin(a);CA[x]=Math.cos(a);}
+  for(let y=0;y<CH;y++){const b=0.9*Math.sin(y*0.05);SB[y]=Math.sin(b);CB[y]=Math.cos(b);}
+  const rel=wrap(SUN_AZ-rob.th), gOn=L.glare>0&&Math.abs(rel)<rad(75), gx=CW/2+F*Math.tan(rel), gy=CH*0.25, inv=1/(2*45*45);
+  const no=(frameNo*613)&8191; let idx=0;
+  const tr=L.tint[0],tg=L.tint[1],tb=L.tint[2];
+  for(let y=0;y<CH;y++){
+    for(let x=0;x<CW;x++){
+      const i=(y*CW+x)*4;
+      let sh=1;
+      if(L.shadow>0){const pat=SA[x]*CB[y]+CA[x]*SB[y]; sh=1-L.shadow*clamp((pat-0.15)*2.5,0,1);}
+      let add=0;
+      if(L.glare>0){ add=L.glare*18; if(gOn){const ex=x-gx,ey=y-gy; add+=L.glare*230*Math.exp(-(ex*ex+ey*ey)*inv);} }
+      const k=L.gain*sh, n=L.noise;
+      cam[i]  =(128+(cam[i]-128)*L.contrast)*k*tr+add+n*noiseTab[(no+idx)&8191];
+      cam[i+1]=(128+(cam[i+1]-128)*L.contrast)*k*tg+add+n*noiseTab[(no+idx+2711)&8191];
+      cam[i+2]=(128+(cam[i+2]-128)*L.contrast)*k*tb+add+n*noiseTab[(no+idx+5423)&8191];
+      idx++;
+    }
+  }
+}
+
+/* ================= lidar ================= */
+const LN=61, LFOV=rad(180), LMAX=6;
+const LA=new Float32Array(LN),LR=new Float32Array(LN),LT=new Float32Array(LN),LALL=new Float32Array(LN),LI=new Float32Array(LN);
+for(let i=0;i<LN;i++)LA[i]=-LFOV/2+i*LFOV/(LN-1);      // positive angle = to the right of the robot
+function scanLidar(){
+  for(let i=0;i<LN;i++){
+    const ang=rob.th+LA[i], dx=Math.cos(ang), dy=Math.sin(ang);
+    const raw=Math.min(castStatic(rob.x,rob.y,dx,dy,0),castPeople(rob.x,rob.y,dx,dy,0,true));
+    const tg=target.active?rayCircle(rob.x,rob.y,dx,dy,target.x,target.y,PERSON_R):Infinity;
+    const infl=Math.min(castStatic(rob.x,rob.y,dx,dy,ROBOT_R+0.08),castPeople(rob.x,rob.y,dx,dy,ROBOT_R+0.08,true));
+    LR[i]=Math.min(raw,LMAX);
+    LT[i]=Math.min(tg,LMAX);
+    LALL[i]=Math.min(Math.min(raw,tg),LMAX)+gauss()*0.02;
+    LI[i]=Math.min(infl,LMAX);
+  }
+}
+function lidarDistAt(beta){
+  const v=[];
+  for(let i=0;i<LN;i++) if(Math.abs(LA[i]-beta)<rad(4)&&LALL[i]<LMAX-0.05) v.push(LALL[i]);
+  if(v.length<2)return null;
+  v.sort((a,b)=>a-b);
+  return v[v.length>>1]+PERSON_R;
+}
+
+/* ================= perception ================= */
+const P_R=new Float32Array(N2),P_G=new Float32Array(N2),P_B=new Float32Array(N2);
+const HUE=new Float32Array(N2),SAT=new Float32Array(N2),VAL=new Float32Array(N2);
+const MASKA=new Uint8Array(N2),MASK=new Uint8Array(N2),VIS=new Uint8Array(N2),STACK=new Int32Array(N2);
+function prepare(data,robust){
+  let sum=0;
+  for(let y=0;y<HH;y++)for(let x=0;x<HW;x++){
+    const i=((2*y)*CW+2*x)*4, j=i+CW*4, k=y*HW+x;
+    const r=(data[i]+data[i+4]+data[j]+data[j+4])*0.25, g=(data[i+1]+data[i+5]+data[j+1]+data[j+5])*0.25, b=(data[i+2]+data[i+6]+data[j+2]+data[j+6])*0.25;
+    P_R[k]=r;P_G[k]=g;P_B[k]=b; sum+=0.299*r+0.587*g+0.114*b;
+  }
+  const mean=sum/N2, gk=robust?clamp(107/Math.max(mean,1),0.6,10):1;
+  for(let k=0;k<N2;k++){
+    let r=P_R[k]*gk,g=P_G[k]*gk,b=P_B[k]*gk;
+    if(r>255)r=255; if(g>255)g=255; if(b>255)b=255;
+    const mx=Math.max(r,g,b),mn=Math.min(r,g,b),d=mx-mn;
+    let h=0; if(d>0){ if(mx===r)h=60*(((g-b)/d+6)%6); else if(mx===g)h=60*((b-r)/d+2); else h=60*((r-g)/d+4); }
+    HUE[k]=h; SAT[k]=mx>0?d/mx:0; VAL[k]=mx/255;
+  }
+  return mean;
+}
+function makeModel(){return{hist:new Float32Array(36),q:new Float32Array(36),bp:new Float32Array(36),locked:false};}
+function finishModel(m){
+  let s=0; for(let i=0;i<36;i++)s+=m.hist[i]; if(s<=0)return false;
+  let q=new Float32Array(36); for(let i=0;i<36;i++)q[i]=m.hist[i]/s;
+  for(let pass=0;pass<3;pass++){const n=new Float32Array(36); for(let i=0;i<36;i++)n[i]=0.25*q[(i+35)%36]+0.5*q[i]+0.25*q[(i+1)%36]; q=n;}
+  let mx=0,t=0; for(let i=0;i<36;i++){mx=Math.max(mx,q[i]);t+=q[i];}
+  for(let i=0;i<36;i++){m.q[i]=q[i]/t;m.bp[i]=q[i]/mx;}
+  m.locked=true; return true;
+}
+function bgBins(){
+  const cnt=new Float32Array(36); let n=0;
+  const rows=[[0,6],[HH-14,HH]];
+  for(const [a,b] of rows)for(let y=a;y<b;y++)for(let x=0;x<HW;x++){const k=y*HW+x; n++; if(SAT[k]>0.2&&VAL[k]>0.1)cnt[(HUE[k]/10)|0]++;}
+  const bg=new Uint8Array(36);
+  for(let i=0;i<36;i++)if(cnt[i]>0.04*n){bg[i]=1;bg[(i+1)%36]=1;bg[(i+35)%36]=1;}
+  return bg;
+}
+function tryLock(m){
+  const bg=bgBins(), h=new Float32Array(36); let n=0;
+  const x0=Math.floor(HW*.38),x1=Math.ceil(HW*.62),y0=Math.floor(HH*.2),y1=Math.floor(HH*.8);
+  for(let y=y0;y<y1;y++)for(let x=x0;x<x1;x++){const k=y*HW+x; if(SAT[k]>0.35&&VAL[k]>0.12){const b=(HUE[k]/10)|0; if(!bg[b]){h[b]+=SAT[k];n++;}}}
+  if(n<12)return false;
+  m.hist.set(h); return finishModel(m);
+}
+function learnAt(m,hx,hy,r){
+  const h=new Float32Array(36); let n=0;
+  for(let y=Math.max(0,hy-r);y<=Math.min(HH-1,hy+r);y++)for(let x=Math.max(0,hx-r);x<=Math.min(HW-1,hx+r);x++){const k=y*HW+x; if(SAT[k]>0.2&&VAL[k]>0.08){h[(HUE[k]/10)|0]+=SAT[k];n++;}}
+  if(n<4)return false; m.hist.set(h); return finishModel(m);
+}
+function findBlobs(m,robust){
+  const sMin=robust?0.2:0.55, vMin=robust?0.1:0.35, bp=m?m.bp:null;
+  for(let k=0;k<N2;k++){
+    let v=0;
+    if(SAT[k]>=sMin&&VAL[k]>=vMin){
+      if(robust){ if(bp[(HUE[k]/10)|0]>=0.3)v=1; }
+      else{ const h=HUE[k]; if(h<12||h>348)v=1; }
+    }
+    MASKA[k]=v;
+  }
+  if(robust){
+    for(let y=0;y<HH;y++)for(let x=0;x<HW;x++){
+      const k=y*HW+x; if(!MASKA[k]){MASK[k]=0;continue;}
+      let c=0;
+      for(let dy=-1;dy<=1;dy++){const yy=y+dy; if(yy<0||yy>=HH)continue; for(let dx=-1;dx<=1;dx++){ if(!dx&&!dy)continue; const xx=x+dx; if(xx<0||xx>=HW)continue; c+=MASKA[yy*HW+xx]; }}
+      MASK[k]=c>=4?1:0;
+    }
+  }else MASK.set(MASKA);
+  VIS.fill(0); const blobs=[];
+  for(let k0=0;k0<N2;k0++){
+    if(!MASK[k0]||VIS[k0])continue;
+    let sp=0; STACK[sp++]=k0; VIS[k0]=1;
+    let area=0,minx=HW,maxx=0,miny=HH,maxy=0; const hist=new Float32Array(36);
+    while(sp){
+      const k=STACK[--sp], x=k%HW, y=(k/HW)|0; area++;
+      if(x<minx)minx=x; if(x>maxx)maxx=x; if(y<miny)miny=y; if(y>maxy)maxy=y;
+      hist[(HUE[k]/10)|0]+=SAT[k];
+      if(x>0&&MASK[k-1]&&!VIS[k-1]){VIS[k-1]=1;STACK[sp++]=k-1;}
+      if(x<HW-1&&MASK[k+1]&&!VIS[k+1]){VIS[k+1]=1;STACK[sp++]=k+1;}
+      if(y>0&&MASK[k-HW]&&!VIS[k-HW]){VIS[k-HW]=1;STACK[sp++]=k-HW;}
+      if(y<HH-1&&MASK[k+HW]&&!VIS[k+HW]){VIS[k+HW]=1;STACK[sp++]=k+HW;}
+    }
+    const w=maxx-minx+1,h=maxy-miny+1;
+    if(area<(robust?5:4)||area/(w*h)<0.3||h/w>6||w/h>4)continue;
+    let s=0; for(let i=0;i<36;i++)s+=hist[i]; for(let i=0;i<36;i++)hist[i]/=s||1;
+    blobs.push({area,minx,maxx,miny,maxy,hist});
+  }
+  blobs.sort((a,b)=>b.area-a.area);
+  return blobs.slice(0,8);
+}
+function measureBlob(b,Fpx){
+  b.cx=b.minx+b.maxx+1; b.wpx=(b.maxx-b.minx+1)*2; b.hpx=(b.maxy-b.miny+1)*2;
+  b.beta=Math.atan2(b.cx-CW/2,Fpx); b.dist=Fpx*SHIRT_H/b.hpx;
+  b.box={x:b.minx*2,y:b.miny*2,w:b.wpx,h:b.hpx};
+}
+function bhat(p,q){let s=0;for(let i=0;i<36;i++)s+=Math.sqrt(p[i]*q[i]);return s;}
+
+/* ================= Kalman filter (constant velocity, world frame) ================= */
+const mul4=(A,B)=>{const C=[[0,0,0,0],[0,0,0,0],[0,0,0,0],[0,0,0,0]];for(let i=0;i<4;i++)for(let j=0;j<4;j++){let s=0;for(let k=0;k<4;k++)s+=A[i][k]*B[k][j];C[i][j]=s;}return C;};
+const tr4=A=>{const C=[[0,0,0,0],[0,0,0,0],[0,0,0,0],[0,0,0,0]];for(let i=0;i<4;i++)for(let j=0;j<4;j++)C[j][i]=A[i][j];return C;};
+const kf={
+  init:false,x:[0,0,0,0],P:null,
+  start(px,py){this.x=[px,py,0,0];this.P=[[.4,0,0,0],[0,.4,0,0],[0,0,1.2,0],[0,0,0,1.2]];this.init=true;},
+  predict(dt,damp){
+    const x=this.x; x[0]+=x[2]*dt; x[1]+=x[3]*dt;
+    if(damp){const k=Math.exp(-damp*dt);x[2]*=k;x[3]*=k;}
+    const q=1.4,d2=dt*dt,d3=d2*dt,d4=d3*dt;
+    const Fm=[[1,0,dt,0],[0,1,0,dt],[0,0,1,0],[0,0,0,1]];
+    const N=mul4(mul4(Fm,this.P),tr4(Fm));
+    N[0][0]+=q*d4/4;N[1][1]+=q*d4/4;N[2][2]+=q*d2;N[3][3]+=q*d2;
+    N[0][2]+=q*d3/2;N[2][0]+=q*d3/2;N[1][3]+=q*d3/2;N[3][1]+=q*d3/2;
+    this.P=N;
+  },
+  maha(zx,zy,r){
+    const P=this.P,a=P[0][0]+r,b=P[0][1],c=P[1][0],d=P[1][1]+r,det=a*d-b*c,yx=zx-this.x[0],yy=zy-this.x[1];
+    return (d*yx*yx-(b+c)*yx*yy+a*yy*yy)/det;
+  },
+  update(zx,zy,r){
+    const P=this.P,a=P[0][0]+r,b=P[0][1],c=P[1][0],d=P[1][1]+r,det=a*d-b*c;
+    const i00=d/det,i01=-b/det,i10=-c/det,i11=a/det, yx=zx-this.x[0], yy=zy-this.x[1];
+    const K=[]; for(let i=0;i<4;i++)K.push([P[i][0]*i00+P[i][1]*i10,P[i][0]*i01+P[i][1]*i11]);
+    for(let i=0;i<4;i++)this.x[i]+=K[i][0]*yx+K[i][1]*yy;
+    const NP=[[0,0,0,0],[0,0,0,0],[0,0,0,0],[0,0,0,0]];
+    for(let i=0;i<4;i++)for(let j=0;j<4;j++)NP[i][j]=P[i][j]-(K[i][0]*P[0][j]+K[i][1]*P[1][j]);
+    this.P=NP;
+  }
+};
+
+/* ================= perceive + track ================= */
+function perceiveAndTrack(){
+  const robust=cfg.mode==='robust';
+  prepare(cam,robust);
+  let blobs=[], acc=null;
+  if(robust){
+    if(!model.locked)tryLock(model);
+    if(kf.init)kf.predict(DT,trk.unseen>0.3?0.6:0);
+    if(model.locked){
+      blobs=findBlobs(model,true);
+      for(const b of blobs){
+        measureBlob(b,F); b.sim=bhat(b.hist,model.q);
+        const ld=lidarDistAt(b.beta);
+        b.lidar=(ld!==null&&Math.abs(ld-b.dist)<1.2)?ld:null;
+        if(b.lidar!==null)b.dist=b.lidar;
+        b.wx=rob.x+Math.cos(rob.th+b.beta)*b.dist; b.wy=rob.y+Math.sin(rob.th+b.beta)*b.dist;
+        b.r=b.lidar!==null?Math.pow(0.07+0.02*b.dist,2):Math.pow(0.12+0.05*b.dist,2);
+        b.d2=kf.init?kf.maha(b.wx,b.wy,b.r):0;
+      }
+      if(!kf.init){
+        let bb=null; for(const b of blobs)if(b.sim>0.6&&(!bb||b.area>bb.area))bb=b;
+        if(bb){kf.start(bb.wx,bb.wy);acc=bb;}
+      }else{
+        let best=null,bs=1e9;
+        for(const b of blobs)if(b.sim>=0.55&&b.d2<16){const sc=b.d2-8*b.sim; if(sc<bs){bs=sc;best=b;}}
+        if(best){
+          kf.update(best.wx,best.wy,best.r); acc=best;
+          if(best.sim>0.8&&best.d2<4){ for(let i=0;i<36;i++)model.hist[i]=0.985*model.hist[i]/(model.hist.reduce((a,c)=>a+c,0)||1)+0.015*best.hist[i]; finishModel(model); }
+        }
+      }
+    }
+  }else{
+    blobs=findBlobs(null,false);
+    for(const b of blobs){measureBlob(b,F);b.wx=rob.x+Math.cos(rob.th+b.beta)*b.dist;b.wy=rob.y+Math.sin(rob.th+b.beta)*b.dist;}
+    if(blobs.length){acc=blobs[0];base.beta=acc.beta;base.dist=acc.dist;base.side=acc.beta>=0?1:-1;}
+  }
+  lastBlobs=blobs; lastAcc=acc;
+  /* tracking bookkeeping */
+  if(acc){
+    if(trk.unseen>0.5){M.occRec++;M.recSum+=trk.unseen;}
+    trk.unseen=0; trk.lostFlag=false;
+    if(search.active)search.active=false;
+  }else trk.unseen+=DT;
+  if(robust){
+    if(!model.locked||!kf.init)trk.state='LOCKING';
+    else if(acc)trk.state='FOLLOWING';
+    else if(trk.unseen<8)trk.state='OCCLUDED - PREDICTING';
+    else trk.state='SEARCHING';
+    if(trk.state==='SEARCHING'&&!trk.lostFlag){trk.lostFlag=true;M.lost++;}
+  }else{
+    if(acc)trk.state='TRACKING';
+    else if(trk.unseen<4)trk.state='LOST - SPINNING';
+    else trk.state='LOST';
+    if(trk.unseen>=4&&!trk.lostFlag){trk.lostFlag=true;M.lost++;}
+  }
+}
+
+/* ================= control ================= */
+function navigate(gx,gy,vMax,stopAt){
+  const dx=gx-rob.x,dy=gy-rob.y,dist=Math.hypot(dx,dy), phiG=wrap(Math.atan2(dy,dx)-rob.th);
+  if(Math.abs(phiG)>rad(100))return{v:0,w:clamp(2.8*phiG,-2.8,2.8)};
+  const vRef=clamp(1.3*(dist-stopAt),0,vMax), need=Math.min(dist,2.5);
+  let bi=-1,bc=1e9; const free=new Float32Array(LN);
+  for(let i=0;i<LN;i++){let f=LMAX;for(let j=Math.max(0,i-2);j<=Math.min(LN-1,i+2);j++)if(LI[j]<f)f=LI[j];free[i]=f;}
+  for(let i=0;i<LN;i++){
+    const f=free[i]; if(f<0.45)continue;
+    const c=Math.abs(wrap(LA[i]-phiG))+0.9*Math.max(0,need-f)+0.25*Math.abs(LA[i]-nav.prevA);
+    if(c<bc){bc=c;bi=i;}
+  }
+  if(bi<0){
+    let l=0,r=0; for(let i=0;i<LN;i++){if(LA[i]<0)l+=LI[i]; else r+=LI[i];}
+    return{v:0,w:r>l?1.6:-1.6};
+  }
+  const a=LA[bi]; nav.prevA=a;
+  const v=Math.min(vRef,0.6*free[bi])*Math.max(0.15,1-Math.abs(a)/rad(80));
+  return{v:dist<=stopAt?0:v,w:clamp(3*a,-3,3)};
+}
+function controlSearch(){
+  if(!search.active){search.active=true;search.gx=kf.x[0];search.gy=kf.x[1];search.t0=simT;search.spin=0;search.i=0;}
+  const d=Math.hypot(search.gx-rob.x,search.gy-rob.y);
+  if(d<1.3||simT-search.t0>22){
+    if(d<1.3){search.spin+=DT; if(search.spin<=6)return{v:0,w:1.1};}
+    const p=SEARCH_PTS[search.i++%SEARCH_PTS.length]; search.gx=p[0];search.gy=p[1];search.spin=0;search.t0=simT;
+  }
+  return navigate(search.gx,search.gy,1.2,0.5);
+}
+function controlRobust(){
+  if(!kf.init||!model.locked)return{v:0,w:0};
+  let cmd;
+  if(trk.unseen<8){
+    cmd=navigate(kf.x[0],kf.x[1],trk.unseen>0.4?0.9:1.7,FOLLOW_D);
+  }else cmd=controlSearch();
+  let front=LMAX; for(let i=0;i<LN;i++)if(Math.abs(LA[i])<rad(25)&&LR[i]<front)front=LR[i];
+  if(front<0.45)cmd.v=Math.min(cmd.v,0);
+  return cmd;
+}
+function controlBaseline(){
+  let v=0,w=0;
+  if(trk.unseen===0){
+    w=clamp(2.2*base.beta,-2.5,2.5);
+    v=clamp(1.2*(base.dist-FOLLOW_D),0,1.4)*Math.max(0,1-Math.abs(base.beta)/rad(50));
+  }else if(trk.unseen<4)w=0.9*base.side;
+  let front=LMAX; for(let i=0;i<LN;i++)if(Math.abs(LA[i])<rad(20)&&LR[i]<front)front=LR[i];
+  if(front<0.5)v=0;
+  return{v,w};
+}
+
+/* ================= world dynamics ================= */
+function walkRoute(p,route,speed){
+  const w=route[p.wi%route.length], dx=w[0]-p.x, dy=w[1]-p.y, d=Math.hypot(dx,dy);
+  if(d<0.12){p.wi=(p.wi+1)%route.length;return;}
+  const s=Math.min(speed*DT,d); p.x+=dx/d*s; p.y+=dy/d*s; p.vx=dx/d*speed; p.vy=dy/d*speed;
+}
+function movePeople(){
+  const T=target;
+  if(cfg.manual){
+    if(T.goal){const dx=T.goal[0]-T.x,dy=T.goal[1]-T.y,d=Math.hypot(dx,dy); if(d>0.1){const s=Math.min(cfg.speed*DT,d);T.x+=dx/d*s;T.y+=dy/d*s;T.vx=dx/d*cfg.speed;T.vy=dy/d*cfg.speed;}else{T.vx=0;T.vy=0;} pushOut(T,PERSON_R);}
+  }else walkRoute(T,TARGET_ROUTE,cfg.speed);
+  if(distr.active)walkRoute(distr,DISTR_ROUTE,0.8);
+  if(cross.active){
+    const dx=cross.goal[0]-cross.x,dy=cross.goal[1]-cross.y,d=Math.hypot(dx,dy);
+    if(d<0.1)cross.active=false; else{const s=Math.min(1.4*DT,d);cross.x+=dx/d*s;cross.y+=dy/d*s;}
+  }
+}
+function moveRobot(cmd){
+  rob.v+=clamp(cmd.v-rob.v,-3*DT,3*DT); rob.w+=clamp(cmd.w-rob.w,-8*DT,8*DT);
+  rob.th=wrap(rob.th+rob.w*DT);
+  rob.x+=Math.cos(rob.th)*rob.v*DT; rob.y+=Math.sin(rob.th)*rob.v*DT;
+  let hit=pushOut(rob,ROBOT_R);
+  for(const p of PEOPLE){ if(!p.active)continue; const dx=rob.x-p.x,dy=rob.y-p.y,d=Math.hypot(dx,dy),m=ROBOT_R+PERSON_R; if(d<m&&d>1e-6){rob.x=p.x+dx/d*m;rob.y=p.y+dy/d*m;hit=true;} }
+  if(hit&&simT-M.lastCol>0.6){M.coll++;M.lastCol=simT;}
+  if(frameNo%6===0){rob.trail.push([rob.x,rob.y]); if(rob.trail.length>260)rob.trail.shift();}
+}
+function spawnCrosser(){
+  const T=target,dx=T.x-rob.x,dy=T.y-rob.y,d=Math.hypot(dx,dy)||1;
+  const px=rob.x+dx*0.4,py=rob.y+dy*0.4,nx=-dy/d,ny=dx/d;
+  cross.x=px+nx*4;cross.y=py+ny*4;cross.goal=[px-nx*4,py-ny*4];cross.active=true;setShirt(cross,[60,140,90]);
+}
+
+/* ================= metrics ================= */
+function zeroMetrics(){return{t:0,vis:0,det:0,trkSum:0,trkN:0,dSq:0,dN:0,coll:0,idsw:0,lost:0,occRec:0,recSum:0,lastCol:-9,lastId:-9,lastHist:0};}
+function updateMetrics(){
+  const T=target,dx=T.x-rob.x,dy=T.y-rob.y,d=Math.hypot(dx,dy); gtDist=d;
+  const rel=wrap(Math.atan2(dy,dx)-rob.th), inFov=Math.abs(rel)<HFOV/2-0.05;
+  const ux=dx/(d||1),uy=dy/(d||1);
+  const sd=castStatic(rob.x,rob.y,ux,uy,0), pd=castPeople(rob.x,rob.y,ux,uy,0,true);
+  gtVis=inFov&&sd>d-0.2&&pd>d-0.1;
+  M.t+=DT;
+  let ok=false;
+  if(gtVis){M.vis++; if(lastAcc&&Math.hypot(lastAcc.wx-T.x,lastAcc.wy-T.y)<1.3){M.det++;ok=true;}}
+  if(lastAcc&&Math.hypot(lastAcc.wx-T.x,lastAcc.wy-T.y)>1.3&&simT-M.lastId>1.5){M.idsw++;M.lastId=simT;}
+  if(kf.init&&cfg.mode==='robust'){M.trkSum+=Math.hypot(kf.x[0]-T.x,kf.x[1]-T.y);M.trkN++;}
+  if(simT>4){const e=clamp(d-FOLLOW_D,-3,3);M.dSq+=e*e;M.dN++;}
+  if(simT-M.lastHist>=0.25){M.lastHist=simT;hist.push({d,vis:gtVis,miss:gtVis&&!ok});if(hist.length>240)hist.shift();}
+}
+
+/* ================= step / reset ================= */
+function step(){
+  simT+=DT; frameNo++;
+  updateLight(); movePeople(); scanLidar(); renderScene(); applyLighting();
+  perceiveAndTrack();
+  const cmd=cfg.mode==='robust'?controlRobust():controlBaseline();
+  moveRobot(cmd);
+  updateMetrics();
+}
+function setDistractor(v){
+  distr.active=v!=='none';
+  if(v==='blue')setShirt(distr,[42,88,200]); else if(v==='similar')setShirt(distr,[205,72,28]);
+  distr.x=18;distr.y=11.8;distr.wi=1;
+}
+function reset(){
+  _seed=20260928; simT=0; frameNo=0; STATIC.length=BASE_STATIC;
+  target=mkPerson(8,6.5,TARGET_SHIRT,true); distr=mkPerson(18,11.8,[42,88,200],false); cross=mkPerson(0,0,[60,140,90],false);
+  PEOPLE=[target,distr,cross];
+  rob={x:6.2,y:6.5,th:0,v:0,w:0,trail:[]};
+  kf.init=false; model=makeModel();
+  trk={unseen:0,state:'LOCKING',lostFlag:false};
+  M=zeroMetrics(); hist=[]; search={active:false}; nav.prevA=0; base={side:1,beta:0,dist:3};
+  lastBlobs=[];lastAcc=null;
+  setDistractor(cfg.distr);
+}
+function relock(){model=makeModel();kf.init=false;trk.unseen=0;trk.state='LOCKING';search.active=false;}
+reset();
+
+/* ================= drawing ================= */
+const SC=30;
+const wc=$('world'),wx=wc.getContext('2d'), cc=$('cam'),cx2=cc.getContext('2d'), mc=$('mask'),mx=mc.getContext('2d'), ch=$('chart'),chx=ch.getContext('2d');
+const camImg=cx2.createImageData(CW,CH), maskImg=mx.createImageData(HW,HH);
+const staticLayer=document.createElement('canvas'); staticLayer.width=900; staticLayer.height=600;
+function buildStatic(){
+  const g=staticLayer.getContext('2d');
+  g.fillStyle='#4c7d3b'; g.fillRect(0,0,900,600);
+  for(let i=0;i<2600;i++){g.fillStyle='rgba('+(50+Math.random()*40|0)+','+(100+Math.random()*50|0)+',50,0.35)'; g.fillRect(Math.random()*900,Math.random()*600,2,2);}
+  g.strokeStyle='rgba(214,194,140,0.30)'; g.lineWidth=24; g.lineJoin='round'; g.beginPath();
+  TARGET_ROUTE.forEach((p,i)=>{const X=p[0]*SC,Y=p[1]*SC; i?g.lineTo(X,Y):g.moveTo(X,Y);}); g.closePath(); g.stroke();
+  for(const o of STATIC.slice(0,BASE_STATIC)) drawObstacle(g,o);
+}
+function drawObstacle(g,o){
+  if(o.k==='circle'){
+    g.beginPath(); g.arc(o.x*SC,o.y*SC,o.r*SC,0,TAU);
+    g.fillStyle=o.t==='tree'?'#5b3f26':o.t==='rock'?'#8a8a90':'#2f6b35'; g.fill();
+    g.strokeStyle='rgba(0,0,0,.35)'; g.lineWidth=1; g.stroke();
+  }else{
+    g.fillStyle=o.t==='wall'?'#a19684':'#5d472e'; g.fillRect(o.x*SC,o.y*SC,o.w*SC,o.h*SC);
+  }
+}
+buildStatic();
+function drawWorld(){
+  wx.drawImage(staticLayer,0,0);
+  for(let i=BASE_STATIC;i<STATIC.length;i++)drawObstacle(wx,STATIC[i]);
+  wx.strokeStyle='rgba(255,255,255,.18)'; wx.lineWidth=2; wx.beginPath();
+  rob.trail.forEach((p,i)=>{i?wx.lineTo(p[0]*SC,p[1]*SC):wx.moveTo(p[0]*SC,p[1]*SC);}); wx.stroke();
+  /* camera wedge */
+  wx.beginPath(); wx.moveTo(rob.x*SC,rob.y*SC); wx.arc(rob.x*SC,rob.y*SC,7*SC,rob.th-HFOV/2,rob.th+HFOV/2); wx.closePath();
+  wx.fillStyle='rgba(255,240,150,0.13)'; wx.fill();
+  if(cfg.lidar){
+    wx.strokeStyle='rgba(255,90,90,.35)'; wx.lineWidth=1; wx.beginPath();
+    for(let i=0;i<LN;i++){const a=rob.th+LA[i]; wx.moveTo(rob.x*SC,rob.y*SC); wx.lineTo((rob.x+Math.cos(a)*LALL[i])*SC,(rob.y+Math.sin(a)*LALL[i])*SC);} wx.stroke();
+  }
+  for(const p of PEOPLE){
+    if(!p.active)continue;
+    wx.beginPath(); wx.arc(p.x*SC,p.y*SC,PERSON_R*SC,0,TAU); wx.fillStyle='rgb('+p.shirt[0]+','+p.shirt[1]+','+p.shirt[2]+')'; wx.fill();
+    wx.lineWidth=p===target?3:1.5;
+    wx.strokeStyle=p===target?(gtVis?(lastAcc&&Math.hypot(lastAcc.wx-p.x,lastAcc.wy-p.y)<1.3?'#5dff9a':'#ff5d5d'):'#ffb454'):'#ffffff';
+    wx.stroke();
+  }
+  if(cfg.manual&&target.goal){wx.strokeStyle='#fff';wx.beginPath();wx.arc(target.goal[0]*SC,target.goal[1]*SC,6,0,TAU);wx.stroke();}
+  if(cfg.est&&kf.init&&cfg.mode==='robust'){
+    const sx=Math.sqrt(kf.P[0][0]),sy=Math.sqrt(kf.P[1][1]);
+    wx.strokeStyle='#3cf0ff';wx.lineWidth=2;wx.setLineDash([5,4]);
+    wx.beginPath();wx.ellipse(kf.x[0]*SC,kf.x[1]*SC,Math.max(6,2*sx*SC),Math.max(6,2*sy*SC),0,0,TAU);wx.stroke();wx.setLineDash([]);
+    wx.beginPath();wx.moveTo(kf.x[0]*SC,kf.y===undefined?kf.x[1]*SC:kf.x[1]*SC);wx.lineTo((kf.x[0]+kf.x[2])*SC,(kf.x[1]+kf.x[3])*SC);wx.stroke();
+  }
+  /* robot */
+  wx.save(); wx.translate(rob.x*SC,rob.y*SC); wx.rotate(rob.th);
+  wx.beginPath(); wx.arc(0,0,ROBOT_R*SC,0,TAU); wx.fillStyle='#e8e8e8'; wx.fill(); wx.strokeStyle='#222'; wx.lineWidth=2; wx.stroke();
+  wx.beginPath(); wx.moveTo(0,0); wx.lineTo(ROBOT_R*SC,0); wx.strokeStyle='#d33'; wx.lineWidth=3; wx.stroke();
+  wx.restore();
+  /* tree canopies above everything */
+  for(let i=0;i<BASE_STATIC;i++){const o=STATIC[i]; if(o.t!=='tree')continue; wx.beginPath();wx.arc(o.x*SC,o.y*SC,o.r*SC*2.4,0,TAU);wx.fillStyle='rgba(28,88,40,.38)';wx.fill();}
+  wx.fillStyle='rgba(0,0,0,.55)'; wx.fillRect(8,8,250,24);
+  wx.fillStyle='#fff'; wx.font='13px system-ui,sans-serif';
+  wx.fillText((cfg.mode==='robust'?'ROBUST':'BASELINE')+' | '+lightNow.name+' | t='+simT.toFixed(0)+'s',14,25);
+}
+function drawCamera(){
+  camImg.data.set(cam); cx2.putImageData(camImg,0,0);
+  cx2.lineWidth=1; cx2.strokeStyle='rgba(255,255,255,.25)'; cx2.beginPath(); cx2.moveTo(CW/2,0);cx2.lineTo(CW/2,CH);cx2.stroke();
+  for(const b of lastBlobs){
+    if(!b.box)continue; const acc=b===lastAcc;
+    cx2.strokeStyle=acc?'#5dff9a':'#ffb454'; cx2.lineWidth=acc?2:1; cx2.strokeRect(b.box.x,b.box.y,b.box.w,b.box.h);
+  }
+  if(lastAcc){cx2.fillStyle='#5dff9a';cx2.font='11px system-ui';cx2.fillText('bearing '+(lastAcc.beta*180/Math.PI).toFixed(1)+' deg  d='+lastAcc.dist.toFixed(1)+' m',6,CH-6);}
+  const bl=cctxHolder.blobsMask||[];
+  for(let k=0;k<N2;k++){const i=k*4; if(MASK[k]){maskImg.data[i]=0;maskImg.data[i+1]=220;maskImg.data[i+2]=140;}else{maskImg.data[i]=18;maskImg.data[i+1]=24;maskImg.data[i+2]=30;} maskImg.data[i+3]=255;}
+  mx.putImageData(maskImg,0,0);
+  for(const b of lastBlobs){mx.strokeStyle=b===lastAcc?'#ffffff':'#ffb454';mx.lineWidth=1;mx.strokeRect(b.minx,b.miny,b.maxx-b.minx+1,b.maxy-b.miny+1);}
+  void bl;
+}
+function drawChart(){
+  const W=ch.width,H=ch.height; chx.clearRect(0,0,W,H); chx.fillStyle='#10171d'; chx.fillRect(0,0,W,H);
+  const N=240, yMax=6, X=i=>i/(N-1)*W, Y=d=>H-8-clamp(d,0,yMax)/yMax*(H-16);
+  const off=N-hist.length;
+  for(let i=0;i<hist.length;i++){
+    if(!hist[i].vis){chx.fillStyle='rgba(160,160,160,.25)';chx.fillRect(X(off+i)-W/N,0,W/N+1,H);}
+    if(hist[i].miss){chx.fillStyle='#ff5d5d';chx.fillRect(X(off+i)-1,H-6,3,6);}
+  }
+  chx.setLineDash([4,4]);chx.strokeStyle='#4fd1a5';chx.beginPath();chx.moveTo(0,Y(FOLLOW_D));chx.lineTo(W,Y(FOLLOW_D));chx.stroke();chx.setLineDash([]);
+  chx.strokeStyle='#e6edf3';chx.lineWidth=1.5;chx.beginPath();
+  hist.forEach((h,i)=>{i?chx.lineTo(X(off+i),Y(h.d)):chx.moveTo(X(off+i),Y(h.d));});chx.stroke();
+  chx.fillStyle='#8fa1b0';chx.font='10px system-ui';chx.fillText('6 m',3,10);chx.fillText('0',3,H-2);
+}
+function updatePanel(){
+  const set=(id,v)=>{$(id).textContent=v;};
+  const pct=(a,b)=>b>0?(100*a/b).toFixed(0)+' %':'-';
+  const st=$('kState'); st.textContent=trk.state; st.style.background=trk.state==='FOLLOWING'||trk.state==='TRACKING'?'#1c3b31':(trk.state.indexOf('LOST')>=0||trk.state==='SEARCHING'?'#4a2323':'#3d341c');
+  set('kLight',lightNow.name); set('kDist',gtDist.toFixed(2)+' m');
+  set('kRms',M.dN?Math.sqrt(M.dSq/M.dN).toFixed(2)+' m':'-');
+  set('kVis',pct(M.vis,Math.max(1,Math.round(M.t/DT)))); set('kDet',pct(M.det,M.vis));
+  set('kTrk',cfg.mode==='robust'&&M.trkN?(M.trkSum/M.trkN).toFixed(2)+' m':'-');
+  set('kCol',String(M.coll)); set('kId',String(M.idsw)); set('kLost',String(M.lost));
+  set('kRec',M.occRec?M.occRec+' (avg '+(M.recSum/M.occRec).toFixed(1)+' s)':'0');
+  const fails=M.coll+M.lost+M.idsw, v=$('kVerdict');
+  v.textContent=fails===0?'No failures so far':fails+' failure(s): '+M.coll+' collision, '+M.lost+' lost, '+M.idsw+' wrong-person';
+  v.className='verdict'+(fails===0?'':' bad');
+}
+
+/* ================= webcam test ================= */
+const web={active:false,video:null,stream:null,model:makeModel(),F:(CW/2)/Math.tan(rad(62)/2),sm:null,blobs:[],pick:null,txt:'',cv:document.createElement('canvas')};
+web.cv.width=CW;web.cv.height=CH;web.ctx=web.cv.getContext('2d');
+async function startWebcam(){
+  try{
+    const stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'},audio:false});
+    web.stream=stream; web.video=document.createElement('video'); web.video.playsInline=true; web.video.muted=true; web.video.srcObject=stream; await web.video.play();
+    web.active=true; web.model=makeModel(); web.sm=null; $('bWeb').textContent='Stop webcam test';
+  }catch(e){ $('webTxt').textContent='Camera not available: '+(e&&e.message?e.message:e); }
+}
+function stopWebcam(){
+  if(web.stream)web.stream.getTracks().forEach(t=>t.stop());
+  web.active=false; web.stream=null; $('bWeb').textContent='Start webcam test'; $('webTxt').textContent='';
+}
+function webStep(){
+  if(!web.video||web.video.readyState<2)return;
+  web.ctx.drawImage(web.video,0,0,CW,CH);
+  const img=web.ctx.getImageData(0,0,CW,CH);
+  cx2.putImageData(img,0,0);
+  prepare(img.data,true);
+  let txt="Click the person's shirt in the camera image to lock the target";
+  web.blobs=[];web.pick=null;
+  if(web.model.locked){
+    const bl=findBlobs(web.model,true); let best=null;
+    for(const b of bl){measureBlob(b,web.F);b.sim=bhat(b.hist,web.model.q); if(b.sim>=0.55&&(!best||b.area>best.area))best=b;}
+    web.blobs=bl;web.pick=best;
+    if(best){
+      web.sm=web.sm?{beta:.6*best.beta+.4*web.sm.beta,dist:.6*best.dist+.4*web.sm.dist}:{beta:best.beta,dist:best.dist};
+      const bd=web.sm.beta*180/Math.PI, turn=Math.abs(bd)<5?'STRAIGHT':(bd<0?'TURN LEFT':'TURN RIGHT'), move=web.sm.dist>FOLLOW_D?'FORWARD':'STOP';
+      txt=turn+' + '+move+' | bearing '+bd.toFixed(1)+' deg | distance about '+web.sm.dist.toFixed(1)+' m (assumes a 0.55 m shirt)';
+    }else{txt='Target not visible: searching...';web.sm=null;}
+  }
+  web.txt=txt; $('webTxt').textContent=txt;
+  for(const b of web.blobs){cx2.strokeStyle=b===web.pick?'#5dff9a':'#ffb454';cx2.lineWidth=b===web.pick?3:1;cx2.strokeRect(b.box.x,b.box.y,b.box.w,b.box.h);}
+  for(let k=0;k<N2;k++){const i=k*4; if(MASK[k]){maskImg.data[i]=0;maskImg.data[i+1]=220;maskImg.data[i+2]=140;}else{maskImg.data[i]=18;maskImg.data[i+1]=24;maskImg.data[i+2]=30;} maskImg.data[i+3]=255;}
+  mx.putImageData(maskImg,0,0);
+}
+
+/* ================= UI wiring ================= */
+$('bPlay').addEventListener('click',()=>{cfg.running=!cfg.running;$('bPlay').textContent=cfg.running?'Pause':'Play';});
+$('bReset').addEventListener('click',()=>reset());
+$('sMode').addEventListener('change',e=>{cfg.mode=e.target.value;reset();});
+$('sLight').addEventListener('change',e=>{cfg.light=e.target.value;});
+$('sSim').addEventListener('change',e=>{cfg.mult=+e.target.value;});
+$('sDis').addEventListener('change',e=>{cfg.distr=e.target.value;setDistractor(cfg.distr);});
+$('cLidar').addEventListener('change',e=>{cfg.lidar=e.target.checked;});
+$('cEst').addEventListener('change',e=>{cfg.est=e.target.checked;});
+$('cMan').addEventListener('change',e=>{
+  cfg.manual=e.target.checked;
+  if(!cfg.manual){let bi=0,bd=1e9;TARGET_ROUTE.forEach((p,i)=>{const d=Math.hypot(p[0]-target.x,p[1]-target.y);if(d<bd){bd=d;bi=i;}});target.wi=bi;}
+  else target.goal=null;
+});
+$('rSpd').addEventListener('input',e=>{cfg.speed=+e.target.value;$('vSpd').textContent=cfg.speed.toFixed(2);});
+$('bCross').addEventListener('click',()=>spawnCrosser());
+$('bRelock').addEventListener('click',()=>relock());
+$('bWeb').addEventListener('click',()=>{web.active?stopWebcam():startWebcam();});
+wc.addEventListener('click',e=>{
+  const r=wc.getBoundingClientRect(), x=(e.clientX-r.left)/r.width*30, y=(e.clientY-r.top)/r.height*20;
+  if(e.shiftKey){ if(STATIC.length<BASE_STATIC+25)STATIC.push({k:'circle',t:'rock',x,y,r:.35,hgt:.5}); }
+  else if(cfg.manual){ target.goal=[clamp(x,.5,29.5),clamp(y,.5,19.5)]; }
+});
+cc.addEventListener('click',e=>{
+  if(!web.active)return;
+  const r=cc.getBoundingClientRect(), hx=Math.round((e.clientX-r.left)/r.width*HW), hy=Math.round((e.clientY-r.top)/r.height*HH);
+  web.model=makeModel(); learnAt(web.model,hx,hy,3);
+});
+
+/* ================= main loop ================= */
+let last=(typeof performance!=='undefined')?performance.now():0, accT=0, panelN=0;
+function frame(now){
+  const dtms=Math.min(100,now-last); last=now;
+  if(web.active)webStep();
+  else{
+    if(cfg.running){
+      accT+=dtms/1000*cfg.mult; let n=0;
+      while(accT>=DT&&n<12){step();accT-=DT;n++;}
+      if(n===12)accT=0;
+    }
+    drawCamera();
+  }
+  drawWorld(); drawChart();
+  if((panelN++)%6===0)updatePanel();
+  requestAnimationFrame(frame);
+}
+globalThis.__SIM__={step,reset,cfg,get M(){return M;},get rob(){return rob;},get trk(){return trk;},get target(){return target;},spawnCrosser,kf,setDistractor,get simT(){return simT;}};
+if(typeof requestAnimationFrame==='function')requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
